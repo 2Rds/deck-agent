@@ -130,6 +130,7 @@ export const payments = pgTable(
       .defaultNow(),
     stripeSessionId: text("stripe_session_id").notNull(),
     stripePaymentIntentId: text("stripe_payment_intent_id"),
+    customerEmail: text("customer_email"),
     amountCents: bigint("amount_cents", { mode: "number" }).notNull(),
     introPricing: boolean("intro_pricing").notNull(),
     deckId: uuid("deck_id").references(() => decks.id, { onDelete: "set null" }),
@@ -138,6 +139,7 @@ export const payments = pgTable(
   (t) => [
     uniqueIndex("payments_stripe_session_id_idx").on(t.stripeSessionId),
     index("payments_status_idx").on(t.status),
+    index("payments_customer_email_idx").on(t.customerEmail),
   ],
 );
 

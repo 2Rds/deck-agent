@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import * as Sentry from "@sentry/nextjs";
 import { getStripe, getActivePricing } from "@/lib/stripe/client";
 
 export const runtime = "nodejs";
@@ -7,6 +8,7 @@ export const dynamic = "force-dynamic";
 export async function POST() {
   const baseUrl = process.env.PUBLIC_BASE_URL;
   if (!baseUrl) {
+    Sentry.captureMessage("PUBLIC_BASE_URL not configured", "error");
     return NextResponse.json(
       { error: "PUBLIC_BASE_URL is not configured" },
       { status: 500 },
@@ -25,7 +27,7 @@ export async function POST() {
       customer_creation: "always",
       metadata: {
         product: "deckredteam_v1",
-        intro_pricing: introActive ? "true" : "false",
+        intro_pricing: String(introActive),
       },
       payment_intent_data: {
         metadata: {
@@ -36,6 +38,7 @@ export async function POST() {
     });
 
     if (!session.url) {
+      Sentry.captureMessage("Stripe returned no checkout URL", "error");
       return NextResponse.json(
         { error: "Stripe did not return a checkout URL" },
         { status: 502 },
@@ -44,6 +47,7 @@ export async function POST() {
 
     return NextResponse.json({ url: session.url, sessionId: session.id });
   } catch (err) {
+    Sentry.captureException(err, { tags: { surface: "checkout_create" } });
     const message = err instanceof Error ? err.message : "unknown error";
     console.error("[checkout] Stripe error:", message);
     return NextResponse.json({ error: "checkout creation failed" }, { status: 502 });

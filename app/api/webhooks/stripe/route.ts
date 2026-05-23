@@ -3,10 +3,17 @@ import * as Sentry from "@sentry/nextjs";
 import type Stripe from "stripe";
 import { getStripe } from "@/lib/stripe/client";
 import { db, payments } from "@/lib/db/client";
-import { eq } from "drizzle-orm";
+import { eq, ne } from "drizzle-orm";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+function extractStripeId(
+  ref: string | { id: string } | null | undefined,
+): string | null {
+  if (typeof ref === "string") return ref;
+  return ref?.id ?? null;
+}
 
 export async function POST(request: Request) {
   const signature = request.headers.get("stripe-signature");
@@ -16,7 +23,7 @@ export async function POST(request: Request) {
 
   const secret = process.env.STRIPE_WEBHOOK_SECRET;
   if (!secret) {
-    console.error("[webhook] STRIPE_WEBHOOK_SECRET not configured");
+    Sentry.captureMessage("STRIPE_WEBHOOK_SECRET not configured", "error");
     return NextResponse.json({ error: "webhook not configured" }, { status: 500 });
   }
 
@@ -60,33 +67,69 @@ export async function POST(request: Request) {
 }
 
 async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
-  if (session.payment_status !== "paid") {
+  const status = session.payment_status;
+  // "paid" = standard happy path. "no_payment_required" = a 100%-off promo code
+  // (we set allow_promotion_codes: true). Both count as completed sessions
+  // and must produce a payments row so the /upload page can bind to the deck.
+  // Any other status (unpaid, pending) should not produce a row.
+  if (status !== "paid" && status !== "no_payment_required") {
+    Sentry.captureMessage("checkout.session.completed with unexpected status", {
+      level: "warning",
+      tags: { stripe_session_id: session.id, payment_status: status ?? "missing" },
+    });
     return;
   }
-  const amountCents = session.amount_total ?? 0;
+
+  // amount_total can be null in some session states. Don't silently record $0;
+  // throw so Stripe retries and Sentry alerts.
+  if (session.amount_total === null || session.amount_total === undefined) {
+    throw new Error(
+      `checkout.session.completed missing amount_total for session ${session.id}`,
+    );
+  }
+
   const introPricing = session.metadata?.intro_pricing === "true";
-  const paymentIntentId =
-    typeof session.payment_intent === "string"
-      ? session.payment_intent
-      : session.payment_intent?.id ?? null;
+
+  // Cross-check intro_pricing metadata against amount paid. If they disagree
+  // (e.g., a Stripe-Dashboard-created session has no metadata), record a
+  // warning rather than corrupt the analytics silently.
+  const introCents = Number(process.env.INTRO_PRICE_CENTS ?? 2900);
+  const standardCents = Number(process.env.STANDARD_PRICE_CENTS ?? 4900);
+  const expectedCents = introPricing ? introCents : standardCents;
+  if (
+    session.amount_total !== 0 &&
+    session.amount_total !== expectedCents &&
+    session.amount_total !== introCents &&
+    session.amount_total !== standardCents
+  ) {
+    Sentry.captureMessage("checkout amount does not match any known price", {
+      level: "warning",
+      tags: {
+        stripe_session_id: session.id,
+        amount_total: String(session.amount_total),
+        intro_pricing: String(introPricing),
+      },
+    });
+  }
+
+  const values = {
+    stripeSessionId: session.id,
+    stripePaymentIntentId: extractStripeId(session.payment_intent),
+    customerEmail: session.customer_details?.email ?? null,
+    amountCents: session.amount_total,
+    introPricing,
+    status: "paid" as const,
+  };
 
   await db
     .insert(payments)
-    .values({
-      stripeSessionId: session.id,
-      stripePaymentIntentId: paymentIntentId,
-      amountCents,
-      introPricing,
-      status: "paid",
-    })
+    .values(values)
     .onConflictDoUpdate({
       target: payments.stripeSessionId,
-      set: {
-        stripePaymentIntentId: paymentIntentId,
-        amountCents,
-        introPricing,
-        status: "paid",
-      },
+      // Never resurrect a refunded payment back to "paid" if the webhook
+      // gets re-delivered after a refund completed.
+      setWhere: ne(payments.status, "refunded"),
+      set: values,
     });
 }
 
@@ -105,16 +148,27 @@ async function handlePaymentFailed(paymentIntent: Stripe.PaymentIntent) {
 }
 
 async function handleChargeRefunded(charge: Stripe.Charge) {
-  const paymentIntentId =
-    typeof charge.payment_intent === "string"
-      ? charge.payment_intent
-      : charge.payment_intent?.id ?? null;
+  const paymentIntentId = extractStripeId(charge.payment_intent);
   if (!paymentIntentId) {
-    console.warn(`[webhook] charge.refunded had no payment_intent: ${charge.id}`);
+    Sentry.captureMessage("charge.refunded had no payment_intent", {
+      level: "warning",
+      tags: { charge_id: charge.id },
+    });
     return;
   }
-  await db
+  const result = await db
     .update(payments)
     .set({ status: "refunded" })
-    .where(eq(payments.stripePaymentIntentId, paymentIntentId));
+    .where(eq(payments.stripePaymentIntentId, paymentIntentId))
+    .returning({ id: payments.id });
+
+  if (result.length === 0) {
+    // No row matched. This is a real silent-failure risk — the customer's
+    // refund landed in Stripe but we don't reflect it. Throw so Stripe retries
+    // and Sentry surfaces it.
+    throw new Error(
+      `charge.refunded matched zero payments rows (pi=${paymentIntentId}, charge=${charge.id})`,
+    );
+  }
 }
+

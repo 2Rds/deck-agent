@@ -1,11 +1,12 @@
 import { CtaButton } from "./_components/cta-button";
 import { getActivePricing } from "@/lib/stripe/client";
 
-export const dynamic = "force-dynamic";
+export const revalidate = 60;
 
 export default function Home() {
-  const { introActive, amountCents } = getActivePricing();
+  const { introActive, amountCents, standardAmountCents } = getActivePricing();
   const priceLabel = `$${(amountCents / 100).toFixed(0)}`;
+  const standardLabel = `$${(standardAmountCents / 100).toFixed(0)}`;
   const brand = process.env.BRAND_DOMAIN ?? "deckredteam.com";
   const supportEmail = `support@${brand}`;
 
@@ -47,7 +48,7 @@ export default function Home() {
         </div>
         {introActive && (
           <p className="mt-8 inline-flex rounded-md border border-amber-300 bg-amber-50 px-3 py-1.5 text-sm text-amber-900">
-            Introductory pricing — {priceLabel} this week, $49 standard from next week.
+            Introductory pricing — {priceLabel} this week, {standardLabel} standard from next week.
           </p>
         )}
       </section>
@@ -229,7 +230,7 @@ export default function Home() {
             ],
             [
               "Can I get a refund if I just don't like the report?",
-              "Email us. We'd rather refund unhappy customers than have them tell people the product is bad. But the bar for &lsquo;don&apos;t like it&rsquo; refunds is honest — if the math is right and the findings are specific, the report did its job.",
+              "Email us. We'd rather refund unhappy customers than have them tell people the product is bad. But the bar for \u2018don\u2019t like it\u2019 refunds is honest — if the math is right and the findings are specific, the report did its job.",
             ],
             [
               "Who is this for?",
@@ -245,10 +246,7 @@ export default function Home() {
               className="rounded-md border border-neutral-200 px-4 py-3"
             >
               <summary className="cursor-pointer font-medium">{q}</summary>
-              <p
-                className="mt-2 text-neutral-700"
-                dangerouslySetInnerHTML={{ __html: a }}
-              />
+              <p className="mt-2 text-neutral-700">{a}</p>
             </details>
           ))}
         </div>

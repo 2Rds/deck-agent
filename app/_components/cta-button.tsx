@@ -15,16 +15,31 @@ export function CtaButton({ priceLabel, className, children }: Props) {
   async function start() {
     setLoading(true);
     setError(null);
+
+    // Safety net: if the browser blocks the navigation (popup blocker, slow
+    // network) the button would stay "Redirecting…" forever. Reset after 15s.
+    const recoveryTimer = window.setTimeout(() => {
+      setLoading(false);
+      setError("Stripe is taking too long — try again");
+    }, 15000);
+
     try {
       const res = await fetch("/api/checkout", { method: "POST" });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.error ?? `checkout failed (${res.status})`);
       }
-      const { url } = await res.json();
-      if (!url) throw new Error("no checkout URL returned");
-      window.location.href = url;
+      let parsed: { url?: string } = {};
+      try {
+        parsed = await res.json();
+      } catch {
+        throw new Error("checkout response invalid — email support");
+      }
+      if (!parsed.url) throw new Error("no checkout URL returned");
+      window.location.href = parsed.url;
+      // Don't clear loading on success — the navigation will tear down the page.
     } catch (e) {
+      window.clearTimeout(recoveryTimer);
       setError(e instanceof Error ? e.message : "unknown error");
       setLoading(false);
     }
