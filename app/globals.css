@@ -5,21 +5,30 @@
   --foreground: #0f0f10;
 }
 
+/*
+  Font CSS variables (--font-serif, --font-sans, --font-mono) are injected by
+  next/font/google in app/layout.tsx. The values below are fallback stacks that
+  apply if next/font fails to load.
+*/
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-serif: "Source Serif 4", Georgia, serif;
-  --font-sans: "Inter", system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+  --font-serif: var(--font-serif), Georgia, "Times New Roman", serif;
+  --font-sans: var(--font-sans), system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: var(--font-mono), ui-monospace, "JetBrains Mono", Menlo, monospace;
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: var(--font-sans);
+  font-family: var(--font-sans), system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 
 h1, h2, h3, h4 {
-  font-family: var(--font-serif);
+  font-family: var(--font-serif), Georgia, serif;
+}
+
+code, pre, kbd {
+  font-family: var(--font-mono), ui-monospace, monospace;
 }

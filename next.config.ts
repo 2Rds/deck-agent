@@ -1,6 +1,15 @@
 import type { NextConfig } from "next";
 import { withSentryConfig } from "@sentry/nextjs";
 
+if (
+  process.env.VERCEL_ENV === "production" &&
+  !process.env.SENTRY_AUTH_TOKEN
+) {
+  throw new Error(
+    "SENTRY_AUTH_TOKEN is required for production builds (source map upload)",
+  );
+}
+
 const nextConfig: NextConfig = {
   experimental: {
     serverActions: {
@@ -14,4 +23,7 @@ export default withSentryConfig(nextConfig, {
   project: "javascript-nextjs",
   silent: !process.env.CI,
   widenClientFileUpload: true,
+  sourcemaps: {
+    deleteSourcemapsAfterUpload: true,
+  },
 });
