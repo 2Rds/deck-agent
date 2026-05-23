@@ -25,15 +25,17 @@ const FormSchema = z.object({
   instrument: InstrumentEnum,
   // Note: optional radio/text inputs come through react-hook-form as "" rather
   // than undefined. We normalize those in onSubmit before posting so the
-  // server sees `undefined` and downstream code (Pass 6 trigger especially)
-  // correctly reads them as "not provided".
+  // server sees `undefined` and downstream pipeline code correctly reads them
+  // as "not provided" rather than "user answered with empty string".
   target_investors: TargetInvestorsEnum.optional(),
   traction_oneline: z.string().max(100).optional(),
   biggest_worry: z.string().max(300).optional(),
   additional_context: z.string().max(300).optional(),
 });
 
-const stripEmpty = <T extends Record<string, unknown>>(values: T): T => {
+const stripEmpty = <T extends Record<string, unknown>>(
+  values: T,
+): Partial<T> => {
   const out: Record<string, unknown> = { ...values };
   for (const key of Object.keys(out)) {
     const v = out[key];
@@ -41,7 +43,7 @@ const stripEmpty = <T extends Record<string, unknown>>(values: T): T => {
       delete out[key];
     }
   }
-  return out as T;
+  return out as Partial<T>;
 };
 
 type FormValues = z.infer<typeof FormSchema>;

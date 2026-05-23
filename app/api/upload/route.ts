@@ -2,10 +2,10 @@ import { NextResponse } from "next/server";
 import * as Sentry from "@sentry/nextjs";
 import { validateSession } from "@/lib/upload/validate-session";
 import { QuestionnaireSchema, normalizeRoundAmount } from "@/schemas/questionnaire";
-import { uploadDeckPdf } from "@/lib/r2/client";
+import { uploadDeckPdf, deckPdfKey } from "@/lib/r2/client";
 import { db, decks, payments } from "@/lib/db/client";
 import { eq, and, sql } from "drizzle-orm";
-import { getInngest } from "@/lib/inngest/client";
+import { sendDeckUploaded } from "@/lib/inngest/client";
 import { randomUUID } from "node:crypto";
 
 export const runtime = "nodejs";
@@ -15,6 +15,17 @@ const MAX_FILE_BYTES = 25 * 1024 * 1024;
 const PDF_MAGIC = "%PDF-";
 
 export async function POST(request: Request) {
+  // Defense in depth: reject obviously oversized requests before the runtime
+  // buffers the entire multipart body. The 1.1x slack covers multipart
+  // overhead (boundary markers, content-disposition headers).
+  const contentLength = Number(request.headers.get("content-length") ?? 0);
+  if (contentLength > MAX_FILE_BYTES * 1.1 + 1024) {
+    return NextResponse.json(
+      { error: "file too large (max 25 MB)" },
+      { status: 413 },
+    );
+  }
+
   let form: FormData;
   try {
     form = await request.formData();
@@ -78,19 +89,40 @@ export async function POST(request: Request) {
   }
   const q = questionnaireValidated.data;
 
-  // Validate session paid + unused
+  // Validate session paid + unused. Exhaustive switch — adding a new variant
+  // to ValidationResult will make TypeScript reject this code until handled.
   const validation = await validateSession(sessionId);
-  if (validation.kind === "already_used") {
-    return NextResponse.json(
-      { error: "session already used", deckId: validation.deckId },
-      { status: 409 },
-    );
-  }
-  if (validation.kind !== "ok") {
-    return NextResponse.json(
-      { error: `session not valid: ${validation.kind}` },
-      { status: 400 },
-    );
+  switch (validation.kind) {
+    case "ok":
+      break; // fall through to upload
+    case "already_used":
+      return NextResponse.json(
+        { error: "session already used", deckId: validation.deckId },
+        { status: 409 },
+      );
+    case "verifying":
+      return NextResponse.json(
+        { error: "payment still verifying, please retry shortly" },
+        { status: 425 },
+      );
+    case "not_paid":
+      return NextResponse.json(
+        { error: `session not paid: ${validation.reason}` },
+        { status: 402 },
+      );
+    case "missing_session_id":
+    case "invalid_session_id":
+      return NextResponse.json(
+        { error: `session ${validation.kind.replace("_", " ")}` },
+        { status: 400 },
+      );
+    case "internal_error":
+      return NextResponse.json({ error: "internal error" }, { status: 500 });
+    default: {
+      // Exhaustiveness guard — TS error if a new kind is added.
+      const _exhaustive: never = validation;
+      throw new Error(`unhandled validation kind: ${JSON.stringify(_exhaustive)}`);
+    }
   }
 
   // PDF magic-byte check
@@ -164,7 +196,7 @@ export async function POST(request: Request) {
         id: deckId,
         stripeSessionId: sessionId,
         customerEmail,
-        r2PdfKey: `decks/${deckId}/original.pdf`,
+        r2PdfKey: deckPdfKey(deckId),
         originalFilename: file.name,
         fileSize: file.size,
         stage: q.stage,
@@ -211,7 +243,7 @@ export async function POST(request: Request) {
       tags: {
         surface: "upload_db_transaction_orphan",
         deck_id: deckId,
-        r2_key: `decks/${deckId}/original.pdf`,
+        r2_key: deckPdfKey(deckId),
         stripe_session_id: sessionId,
       },
     });
@@ -231,14 +263,10 @@ export async function POST(request: Request) {
 
   // Fire the pipeline. If Inngest fails, mark the deck failed explicitly so
   // (a) the customer's /processing page shows the right state, (b) Stage F
-  // refund logic surfaces it, and (c) the deck is distinguishable from one
-  // that's actually being processed. The deck stays in DB so the operator
-  // can re-fire from the deck_id.
+  // refund logic surfaces it via the requires_refund Sentry tag, and (c) the
+  // deck is distinguishable from one that's actually being processed.
   try {
-    await getInngest().send({
-      name: "deck/uploaded",
-      data: { deckId },
-    });
+    await sendDeckUploaded(deckId);
   } catch (err) {
     Sentry.captureException(err, {
       tags: {
@@ -257,18 +285,25 @@ export async function POST(request: Request) {
         })
         .where(eq(decks.id, deckId));
     } catch (markErr) {
-      // Even the failure-marking failed. The deck row exists with status
-      // "uploaded" — operator must fix manually. Sentry will have both
-      // events; the dispatch one with requires_refund tag is the alert.
+      // Even the failure-marking failed. Carry the requires_refund tag here
+      // too so the operator's primary alert filter catches both events.
       Sentry.captureException(markErr, {
         tags: {
           surface: "upload_inngest_send_failure_mark",
           deck_id: deckId,
+          requires_refund: "true",
         },
       });
     }
+    // Customer-facing copy: we say "flagged" not "will be" — refund
+    // automation is a Stage F concern; until then it requires operator
+    // action. Promising automation we don't have is a trust hazard.
     return NextResponse.json(
-      { error: "pipeline dispatch failed — your payment will be refunded", deckId },
+      {
+        error:
+          "Pipeline couldn't start. We've flagged this session for a refund — email support@deckredteam.com if you don't see one within 24 hours.",
+        deckId,
+      },
       { status: 502 },
     );
   }

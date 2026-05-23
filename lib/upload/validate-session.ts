@@ -37,24 +37,6 @@ export type ValidationResult =
     };
 
 /**
- * Validate a Stripe Checkout session_id from the success_url query param.
- *
- * Race condition: Stripe redirects the buyer to /upload BEFORE the
- * checkout.session.completed webhook lands. So the order is:
- *
- *   1. Look up the payments row by session_id.
- *   2. If found and paid + unused → ok.
- *   3. If found and used → already_used (deck already created).
- *   4. If not found → fall back to Stripe API to verify payment.
- *      - If Stripe says paid → return "verifying" so the UI can poll briefly.
- *      - If Stripe says unpaid → return "not_paid".
- *      - If Stripe says session doesn't exist → "invalid_session_id".
- *
- * The "verifying" state should NOT defensively write a payments row — that
- * would race with the webhook. Just poll until the webhook lands, with a
- * reasonable timeout (~10s) on the client.
- */
-/**
  * DB-only session check for the polling endpoint. Returns `ok`/`already_used`
  * once the webhook has landed, or `verifying` otherwise. Intentionally does
  * NOT call Stripe — the initial server-component render already did the
@@ -106,6 +88,24 @@ export async function validateSessionDbOnly(
   }
 }
 
+/**
+ * Full session validation for the initial /upload server-component render.
+ *
+ * Race condition: Stripe redirects to /upload BEFORE the
+ * checkout.session.completed webhook lands. So:
+ *
+ *   1. Look up the payments row by session_id.
+ *   2. If found and paid + unused → ok.
+ *   3. If found and used → already_used (deck already created).
+ *   4. If not found → fall back to Stripe API to verify payment.
+ *      - If Stripe says paid → return "verifying" so the UI can poll briefly.
+ *      - If Stripe says unpaid → return "not_paid".
+ *      - If Stripe says session doesn't exist → "invalid_session_id".
+ *
+ * The "verifying" state must NOT defensively write a payments row — that
+ * would race with the webhook. The UI polls validateSessionDbOnly until the
+ * webhook lands, with a 90s client timeout.
+ */
 export async function validateSession(
   sessionIdRaw: string | undefined | null,
 ): Promise<ValidationResult> {
@@ -177,13 +177,28 @@ export async function validateSession(
       return { kind: "not_paid", reason: "payment was refunded" };
     }
     // status === "pending" — odd; webhook should have flipped to paid. Fall
-    // through to Stripe verification, but surface a Sentry alert so the
-    // operator can manually re-deliver the webhook from Stripe dashboard if
-    // it's been pending for any meaningful time.
-    Sentry.captureMessage("payment row stuck in pending state", {
-      level: "warning",
-      tags: { stripe_session_id: sessionId },
-    });
+    // through to Stripe verification. Surface a Sentry alert ONLY for rows
+    // older than 30s — for fresh rows the webhook is just racing the render
+    // and shouldn't generate alert noise.
+    // Note: Drizzle doesn't expose createdAt on the partial select above,
+    // so refetch only when we're already past the fast path.
+    const stale = await db
+      .select({ createdAt: payments.createdAt })
+      .from(payments)
+      .where(eq(payments.stripeSessionId, sessionId))
+      .limit(1);
+    const ageMs = stale[0]
+      ? Date.now() - new Date(stale[0].createdAt).getTime()
+      : 0;
+    if (ageMs > 30_000) {
+      Sentry.captureMessage("payment row stuck in pending state for >30s", {
+        level: "warning",
+        tags: {
+          stripe_session_id: sessionId,
+          age_ms: String(ageMs),
+        },
+      });
+    }
   }
 
   // 2. Fall back to Stripe API to verify directly.
@@ -204,15 +219,32 @@ export async function validateSession(
       reason: `payment status is ${session.payment_status}`,
     };
   } catch (err) {
-    const isStripeNotFound =
-      err instanceof Error &&
-      "code" in err &&
-      (err as { code?: string }).code === "resource_missing";
-    if (isStripeNotFound) {
+    const code =
+      err instanceof Error && "code" in err
+        ? (err as { code?: string }).code
+        : undefined;
+    const errType =
+      err instanceof Error && "type" in err
+        ? (err as { type?: string }).type
+        : undefined;
+
+    // Session truly doesn't exist on Stripe.
+    if (code === "resource_missing") {
       return { kind: "invalid_session_id" };
     }
+    // Session existed but has expired (Stripe expires Checkout sessions
+    // ~24h after creation). Surface to the user as not_paid so they get a
+    // clear message rather than "internal error."
+    if (code === "checkout_session_expired" || code === "session_expired") {
+      return { kind: "not_paid", reason: "checkout session expired" };
+    }
+    // Stripe API itself degraded — log and surface as internal_error.
     Sentry.captureException(err, {
-      tags: { surface: "validate_session_stripe_lookup" },
+      tags: {
+        surface: "validate_session_stripe_lookup",
+        stripe_error_type: errType ?? "unknown",
+        stripe_error_code: code ?? "unknown",
+      },
     });
     return { kind: "internal_error" };
   }

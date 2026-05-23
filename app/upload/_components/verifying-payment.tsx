@@ -9,17 +9,22 @@ type Props = {
 
 const POLL_INTERVAL_MS = 1500;
 // Stripe webhook delivery typically lands in 1-5s but during incidents can
-// take 30s-5min. 90s covers ~99% of normal-conditions deliveries without
-// stranding the customer.
+// take 30s-5min. 90s covers the long tail without stranding the customer
+// during normal Stripe operation.
 const TIMEOUT_MS = 90_000;
 
-/**
- * Stripe redirects the buyer to /upload immediately on payment success, but
- * the checkout.session.completed webhook is asynchronous and typically lags
- * 1-5s. This screen short-polls the validation endpoint until the webhook
- * lands and the payments row appears. After ~20s we give up and show a
- * contact-support fallback.
- */
+// Any kind that means "the server has a definitive answer; stop polling and
+// re-render server component." The form is rendered on `ok`; an error page
+// is rendered on the terminal failures.
+const TERMINAL_KINDS = new Set([
+  "ok",
+  "already_used",
+  "not_paid",
+  "invalid_session_id",
+  "missing_session_id",
+  "internal_error",
+]);
+
 export function VerifyingPayment({ sessionId, supportEmail }: Props) {
   const [timedOut, setTimedOut] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -39,14 +44,21 @@ export function VerifyingPayment({ sessionId, supportEmail }: Props) {
             `/api/upload/session-status?session_id=${encodeURIComponent(sessionId)}`,
             { cache: "no-store" },
           );
-          if (res.ok) {
-            const { kind } = (await res.json()) as { kind: string };
-            if (kind === "ok" || kind === "already_used") {
-              // Reload server component to render the form or already-used error.
-              window.location.reload();
-              return;
+          if (!res.ok) {
+            // Don't silently keep polling on server errors — surface to user.
+            if (!cancelled) {
+              setError(`session check returned HTTP ${res.status}`);
             }
+            return;
           }
+          const { kind } = (await res.json()) as { kind: string };
+          if (TERMINAL_KINDS.has(kind)) {
+            // Reload so the server component re-renders with the appropriate
+            // form / error / already-used page.
+            window.location.reload();
+            return;
+          }
+          // kind === "verifying" → keep polling
         } catch (e) {
           if (!cancelled) {
             setError(e instanceof Error ? e.message : "polling error");
@@ -71,7 +83,7 @@ export function VerifyingPayment({ sessionId, supportEmail }: Props) {
       </p>
       {timedOut && (
         <div className="rounded-md border border-amber-300 bg-amber-50 p-4 text-amber-900">
-          <p className="font-medium">Still waiting.</p>
+          <p className="font-medium">Still waiting after 90 seconds.</p>
           <p className="mt-1 text-sm">
             The webhook is taking longer than usual. Email{" "}
             <a className="underline" href={`mailto:${supportEmail}`}>
@@ -84,7 +96,12 @@ export function VerifyingPayment({ sessionId, supportEmail }: Props) {
       )}
       {error && (
         <p className="text-sm text-red-700">
-          Polling error: {error}. Refresh the page to retry.
+          Couldn&rsquo;t check your payment status: {error}. Refresh to retry, or
+          email{" "}
+          <a className="underline" href={`mailto:${supportEmail}`}>
+            {supportEmail}
+          </a>
+          .
         </p>
       )}
     </main>

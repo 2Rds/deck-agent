@@ -3,7 +3,7 @@ import * as Sentry from "@sentry/nextjs";
 import type Stripe from "stripe";
 import { getStripe, parseCentsEnv } from "@/lib/stripe/client";
 import { db, payments } from "@/lib/db/client";
-import { eq, ne } from "drizzle-orm";
+import { and, eq, ne } from "drizzle-orm";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -138,9 +138,18 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
     .values(values)
     .onConflictDoUpdate({
       target: payments.stripeSessionId,
-      // Never resurrect a refunded payment back to "paid" if a re-delivered
-      // checkout.session.completed event arrives after a refund.
-      setWhere: ne(payments.status, "refunded"),
+      // Never resurrect a payment row back to "paid" once it has transitioned
+      // to a terminal state. Two reasons:
+      //   - "refunded": webhook re-delivery shouldn't un-refund
+      //   - "used": the upload route has already created a deck for this
+      //     session; flipping back to "paid" would let a second upload pass
+      //     the atomic-mark-used check, then crash on the unique index on
+      //     decks.stripe_session_id, leaking an R2 orphan and producing a
+      //     bogus refund promise to the customer who already got their report.
+      setWhere: and(
+        ne(payments.status, "refunded"),
+        ne(payments.status, "used"),
+      ),
       set: values,
     })
     .returning({ id: payments.id });

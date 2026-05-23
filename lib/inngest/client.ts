@@ -1,38 +1,43 @@
 import { Inngest } from "inngest";
 
 /**
- * The Inngest event registry. Each entry is the typed schema for one event
- * the pipeline cares about. Stage D will wire up function handlers; this
- * file is the canonical source of event shapes for both senders and handlers.
+ * Event registry — canonical source of event shapes. Inngest v4 doesn't
+ * accept a typed schemas option on `new Inngest()`, so we wrap the .send()
+ * calls in typed helpers (`sendDeckUploaded`, `sendDeckFailed`) instead.
+ * Callers should use the helpers; do not call `getInngest().send()` directly
+ * because that path is type-erased.
  */
-type DeckUploadedEvent = {
+export type DeckUploadedEvent = {
   name: "deck/uploaded";
-  data: {
-    deckId: string;
-  };
+  data: { deckId: string };
 };
 
-type DeckFailedEvent = {
+export type DeckFailedEvent = {
   name: "deck/failed";
-  data: {
-    deckId: string;
-    reason: string;
-  };
+  data: { deckId: string; reason: string };
 };
 
-export type DeckRedTeamEvents = {
-  "deck/uploaded": DeckUploadedEvent;
-  "deck/failed": DeckFailedEvent;
-};
-
-let cached: Inngest<{ id: string }> | null = null;
+let cached: Inngest | null = null;
 
 export function getInngest() {
   if (cached) return cached;
   cached = new Inngest({
     id: "deckredteam",
     // INNGEST_EVENT_KEY auto-picked up by the SDK; the SDK falls back to
-    // dev mode when running locally without it.
+    // dev mode locally without it.
   });
   return cached;
+}
+
+export async function sendDeckUploaded(deckId: string) {
+  const event: DeckUploadedEvent = { name: "deck/uploaded", data: { deckId } };
+  return getInngest().send(event);
+}
+
+export async function sendDeckFailed(deckId: string, reason: string) {
+  const event: DeckFailedEvent = {
+    name: "deck/failed",
+    data: { deckId, reason },
+  };
+  return getInngest().send(event);
 }

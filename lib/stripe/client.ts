@@ -30,6 +30,12 @@ export function getStripe(): Stripe {
   const client = new Stripe(key, {
     apiVersion: "2026-04-22.dahlia",
     typescript: true,
+    // Tight per-request timeout. Default SDK is ~80s which holds a Node
+    // process slot during Stripe API degradation and exhausts the runtime
+    // under any traffic. Callers handle errors by surfacing a generic
+    // internal_error to the user, which arrives in a couple seconds.
+    timeout: 5_000,
+    maxNetworkRetries: 1,
   });
   cached = { client, keyPrefix };
   return client;
