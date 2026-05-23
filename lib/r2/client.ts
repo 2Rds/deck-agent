@@ -5,6 +5,7 @@ import {
   HeadObjectCommand,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import type { R2Key, PresignedUrl } from "@/lib/types/brands";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -23,17 +24,33 @@ function readEnv() {
   return { accountId, accessKeyId, secretAccessKey, bucket };
 }
 
-let cached: { client: S3Client; bucket: string } | null = null;
+let cached: {
+  client: S3Client;
+  bucket: string;
+  accessKeyIdPrefix: string;
+} | null = null;
 
 function getClient() {
-  if (cached) return cached;
   const { accountId, accessKeyId, secretAccessKey, bucket } = readEnv();
+  const accessKeyIdPrefix = accessKeyId.slice(0, 6);
+  // If credentials rotated, invalidate the cached client so the next call uses
+  // the new key. Silent staleness on rotation = silent 403s on in-flight jobs.
+  if (cached && cached.accessKeyIdPrefix !== accessKeyIdPrefix) {
+    console.warn(
+      `[r2] credential rotation detected (was ${cached.accessKeyIdPrefix}, now ${accessKeyIdPrefix}); recreating client`,
+    );
+    cached = null;
+  }
+  if (cached) return cached;
+  console.log(
+    `[r2] constructing S3 client (bucket=${bucket}, accessKeyIdPrefix=${accessKeyIdPrefix})`,
+  );
   const client = new S3Client({
     region: "auto",
     endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
     credentials: { accessKeyId, secretAccessKey },
   });
-  cached = { client, bucket };
+  cached = { client, bucket, accessKeyIdPrefix };
   return cached;
 }
 
@@ -43,9 +60,9 @@ function assertDeckId(deckId: string): asserts deckId is string {
   }
 }
 
-export function deckPdfKey(deckId: string): string {
+export function deckPdfKey(deckId: string): R2Key {
   assertDeckId(deckId);
-  return `decks/${deckId}/original.pdf`;
+  return `decks/${deckId}/original.pdf` as R2Key;
 }
 
 export async function uploadDeckPdf(
@@ -122,11 +139,12 @@ export async function headDeckPdf(
 export async function getDeckPdfPresignedUrl(
   deckId: string,
   expiresInSeconds = 3600,
-): Promise<string> {
+): Promise<PresignedUrl> {
   const { client, bucket } = getClient();
-  return getSignedUrl(
+  const url = await getSignedUrl(
     client,
     new GetObjectCommand({ Bucket: bucket, Key: deckPdfKey(deckId) }),
     { expiresIn: expiresInSeconds },
   );
+  return url as PresignedUrl;
 }

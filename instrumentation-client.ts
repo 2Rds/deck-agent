@@ -14,4 +14,7 @@ if (dsn && isProd) {
   });
 }
 
-export const onRouterTransitionStart = Sentry.captureRouterTransitionStart;
+// Fallback no-op so Next never sees an undefined import — Sentry's SDK normally
+// provides this as a no-op when init() hasn't run, but versions vary.
+export const onRouterTransitionStart =
+  Sentry.captureRouterTransitionStart ?? (() => {});

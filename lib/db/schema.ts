@@ -149,8 +149,12 @@ export type Payment = typeof payments.$inferSelect;
 export type NewPayment = typeof payments.$inferInsert;
 
 /**
- * Discriminated unions over deck/report status. Use these in code paths that
- * branch on status — TypeScript will then narrow correctly.
+ * Discriminated unions over deck/report status. Cross-field invariants
+ * (status="complete" ↔ failureReason is null; status="failed" ↔ failureReason
+ * is non-null; isPublic ↔ publicToken) are NOT enforced at the DB level — no
+ * CHECK constraints. Use the narrowing helpers below at the boundary where
+ * you read a row to assert these invariants explicitly; TypeScript will then
+ * narrow correctly in downstream code.
  */
 export type CompletedDeck = Deck & { status: "complete"; failureReason: null };
 export type FailedDeck = Deck & { status: "failed"; failureReason: string };
@@ -158,3 +162,40 @@ export type ActiveDeck = Deck & { status: "uploaded" | "processing" };
 
 export type PublicReport = Report & { isPublic: true; publicToken: string };
 export type PrivateReport = Report & { isPublic: false; publicToken: null };
+
+export function narrowDeck(deck: Deck): CompletedDeck | FailedDeck | ActiveDeck {
+  if (deck.status === "failed") {
+    if (!deck.failureReason) {
+      throw new Error(
+        `deck ${deck.id} has status=failed but null failureReason — invariant violated`,
+      );
+    }
+    return deck as FailedDeck;
+  }
+  if (deck.status === "complete") {
+    if (deck.failureReason) {
+      throw new Error(
+        `deck ${deck.id} has status=complete but non-null failureReason — invariant violated`,
+      );
+    }
+    return deck as CompletedDeck;
+  }
+  return deck as ActiveDeck;
+}
+
+export function narrowReport(report: Report): PublicReport | PrivateReport {
+  if (report.isPublic) {
+    if (!report.publicToken) {
+      throw new Error(
+        `report ${report.id} has isPublic=true but null publicToken — invariant violated`,
+      );
+    }
+    return report as PublicReport;
+  }
+  if (report.publicToken) {
+    throw new Error(
+      `report ${report.id} has isPublic=false but non-null publicToken — invariant violated`,
+    );
+  }
+  return report as PrivateReport;
+}

@@ -5,6 +5,10 @@ DROP INDEX "reports_public_token_idx";--> statement-breakpoint
 ALTER TABLE "decks" ALTER COLUMN "stage" SET DATA TYPE "public"."stage" USING "stage"::"public"."stage";--> statement-breakpoint
 ALTER TABLE "decks" ALTER COLUMN "instrument" SET DATA TYPE "public"."instrument" USING "instrument"::"public"."instrument";--> statement-breakpoint
 ALTER TABLE "decks" ALTER COLUMN "target_investors" SET DATA TYPE "public"."target_investors" USING "target_investors"::"public"."target_investors";--> statement-breakpoint
-ALTER TABLE "decks" ADD COLUMN "customer_email" text NOT NULL;--> statement-breakpoint
+-- ADD COLUMN with a temporary DEFAULT so any pre-existing rows are populated,
+-- then DROP DEFAULT so future inserts must explicitly supply customer_email.
+-- Safe on empty tables (idempotent) and non-empty replays alike.
+ALTER TABLE "decks" ADD COLUMN "customer_email" text NOT NULL DEFAULT '';--> statement-breakpoint
+ALTER TABLE "decks" ALTER COLUMN "customer_email" DROP DEFAULT;--> statement-breakpoint
 CREATE INDEX "decks_customer_email_idx" ON "decks" USING btree ("customer_email");--> statement-breakpoint
 CREATE UNIQUE INDEX "reports_public_token_idx" ON "reports" USING btree ("public_token") WHERE "reports"."public_token" IS NOT NULL;

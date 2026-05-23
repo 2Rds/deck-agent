@@ -1,35 +1,24 @@
 import { z } from "zod";
+import {
+  stageEnum,
+  instrumentEnum,
+  targetInvestorsEnum,
+} from "@/lib/db/schema";
 
 /**
- * Questionnaire Schema — the 6-question form filled out after payment
+ * Questionnaire Schema — the 6-question form filled out after payment.
  *
  * Used by the upload page for form validation and by the Worker for
  * variable substitution into prompts.
+ *
+ * The enum literal values are pulled directly from the Drizzle pgEnums in
+ * lib/db/schema.ts to prevent silent drift between the Zod validation layer
+ * and the DB enforcement layer. Edit the pgEnum and this updates too.
  */
 
-export const StageEnum = z.enum([
-  "Pre-seed",
-  "Seed",
-  "Series A",
-  "Bridge / extension",
-  "Not sure yet",
-]);
-
-export const InstrumentEnum = z.enum([
-  "SAFE",
-  "Priced round",
-  "Convertible note",
-  "Not decided yet",
-]);
-
-export const TargetInvestorsEnum = z.enum([
-  "Tier 1 VC partners (a16z, Sequoia, etc.)",
-  "Generalist seed funds",
-  "Angel investors / scouts",
-  "Strategic / corporate investors",
-  "Friends & family",
-  "Not sure / haven't decided",
-]);
+export const StageEnum = z.enum(stageEnum.enumValues);
+export const InstrumentEnum = z.enum(instrumentEnum.enumValues);
+export const TargetInvestorsEnum = z.enum(targetInvestorsEnum.enumValues);
 
 export const QuestionnaireSchema = z.object({
   stage: StageEnum,

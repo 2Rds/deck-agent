@@ -11,6 +11,13 @@ function init() {
   if (!connectionString) {
     throw new Error("DATABASE_URL is not set");
   }
+  try {
+    console.log(
+      `[db] connecting to ${new URL(connectionString).host} as postgres user`,
+    );
+  } catch {
+    // ignore URL parse errors — error will surface on first query
+  }
   const client = postgres(connectionString, {
     prepare: false,
     max: 10,
@@ -33,9 +40,23 @@ function init() {
 
 export const db = new Proxy({} as DbConn, {
   get(_t, prop) {
+    // Promise-detection probes (Symbol.toPrimitive, "then", etc.) must short-circuit
+    // before init() runs — otherwise the proxy looks like a rejected thenable to
+    // anything that does `await db` or `Promise.resolve(db)`, masking the real
+    // "DATABASE_URL missing" error as an UnhandledPromiseRejection.
+    if (prop === "then" || typeof prop === "symbol") return undefined;
     const { db } = init();
     return Reflect.get(db, prop, db);
   },
 });
+
+/**
+ * Escape hatch for code that needs the raw postgres.Sql client — e.g.,
+ * LISTEN/NOTIFY, manual transactions outside Drizzle, or one-off migration
+ * scripts. Most code should use `db` instead.
+ */
+export function getDbClient(): postgres.Sql {
+  return init().client;
+}
 
 export * from "./schema";
