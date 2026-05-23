@@ -3,7 +3,12 @@
 import { useEffect } from "react";
 import * as Sentry from "@sentry/nextjs";
 
-export default function GlobalError({
+// Hardcoded fallback. The brand domain is server-only via BRAND_DOMAIN; client
+// components can't read it without the NEXT_PUBLIC_ prefix. v1 doesn't need
+// runtime brand swap; if that changes, expose NEXT_PUBLIC_BRAND_DOMAIN.
+const SUPPORT_EMAIL = "support@deckredteam.com";
+
+export default function ErrorBoundary({
   error,
   reset,
 }: {
@@ -11,7 +16,9 @@ export default function GlobalError({
   reset: () => void;
 }) {
   useEffect(() => {
-    Sentry.captureException(error);
+    Sentry.captureException(error, {
+      extra: { digest: error.digest },
+    });
   }, [error]);
 
   return (
@@ -20,11 +27,8 @@ export default function GlobalError({
       <p className="text-neutral-700">
         We&rsquo;ve been notified and are looking into it. Try again in a moment, or
         email{" "}
-        <a
-          className="underline"
-          href={`mailto:support@${process.env.NEXT_PUBLIC_BRAND_DOMAIN ?? "deckredteam.com"}`}
-        >
-          support
+        <a className="underline" href={`mailto:${SUPPORT_EMAIL}`}>
+          {SUPPORT_EMAIL}
         </a>{" "}
         if it keeps happening.
       </p>

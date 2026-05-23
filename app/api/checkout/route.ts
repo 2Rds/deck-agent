@@ -6,16 +6,16 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function POST() {
-  const baseUrl = process.env.PUBLIC_BASE_URL;
-  if (!baseUrl) {
-    Sentry.captureMessage("PUBLIC_BASE_URL not configured", "error");
-    return NextResponse.json({ error: "checkout unavailable" }, { status: 500 });
-  }
-
-  const { introActive, priceId } = getActivePricing();
-  const stripe = getStripe();
-
   try {
+    const baseUrl = process.env.PUBLIC_BASE_URL;
+    if (!baseUrl) {
+      Sentry.captureMessage("PUBLIC_BASE_URL not configured", "error");
+      return NextResponse.json({ error: "checkout unavailable" }, { status: 500 });
+    }
+
+    const { introActive, priceId } = getActivePricing();
+    const stripe = getStripe();
+
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
       line_items: [{ price: priceId, quantity: 1 }],
@@ -43,7 +43,7 @@ export async function POST() {
   } catch (err) {
     Sentry.captureException(err, { tags: { surface: "checkout_create" } });
     const message = err instanceof Error ? err.message : "unknown error";
-    console.error("[checkout] Stripe error:", message);
-    return NextResponse.json({ error: "checkout creation failed" }, { status: 502 });
+    console.error("[checkout] error:", message);
+    return NextResponse.json({ error: "checkout unavailable" }, { status: 502 });
   }
 }

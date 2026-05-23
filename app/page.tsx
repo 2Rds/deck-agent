@@ -1,7 +1,11 @@
 import { CtaButton } from "./_components/cta-button";
 import { getActivePricing } from "@/lib/stripe/client";
 
-export const revalidate = 60;
+// Tight ISR window: the intro-pricing → standard-pricing transition is
+// time-based (INTRO_PRICING_END_DATE), and the cached page must not advertise
+// a price the checkout route will refuse to honor. 5s ≈ the worst-case window
+// where a stale cached page can lie about pricing.
+export const revalidate = 5;
 
 export default function Home() {
   const { introActive, amountCents, standardAmountCents } = getActivePricing();

@@ -60,7 +60,16 @@ export function getActivePricing(now: Date = new Date()): {
     );
   }
 
-  const introActive = !!endDate && now < new Date(endDate);
+  let introActive = false;
+  if (endDate) {
+    const cutoff = new Date(endDate);
+    if (!Number.isFinite(cutoff.getTime())) {
+      throw new Error(
+        `INTRO_PRICING_END_DATE is not a valid ISO date string: ${JSON.stringify(endDate)}`,
+      );
+    }
+    introActive = now < cutoff;
+  }
   return introActive
     ? {
         introActive: true,

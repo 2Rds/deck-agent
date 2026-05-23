@@ -96,20 +96,19 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
   const expectedCents = introPricing ? introCents : standardCents;
   const discountCents = session.total_details?.amount_discount ?? 0;
 
-  // Real mismatch check: did the amount paid match what the metadata said the
-  // tier was? `no_payment_required` (amount_total === 0) bypasses since it's
-  // the legitimate 100%-off promo path. Other discounted amounts (partial
-  // promos) are accepted as long as the post-discount amount is plausible.
-  if (
-    session.amount_total !== 0 &&
-    discountCents === 0 &&
-    session.amount_total !== expectedCents
-  ) {
-    Sentry.captureMessage("checkout amount does not match metadata tier", {
+  // Tier-spoofing defense-in-depth: the pre-discount amount (amount_paid +
+  // discount) must equal the tier price the metadata claims. Covers both
+  // full-price and partial-promo paths. Skip only for `no_payment_required`
+  // (100%-off promo, amount_total === 0 AND discount === expectedCents).
+  const grossCents = session.amount_total + discountCents;
+  const isFullPromo = session.amount_total === 0 && discountCents === expectedCents;
+  if (!isFullPromo && grossCents !== expectedCents) {
+    Sentry.captureMessage("checkout gross amount does not match metadata tier", {
       level: "warning",
       tags: {
         stripe_session_id: session.id,
         amount_total: String(session.amount_total),
+        discount: String(discountCents),
         expected: String(expectedCents),
         intro_pricing: String(introPricing),
       },
@@ -146,11 +145,14 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
     })
     .returning({ id: payments.id });
 
-  // If onConflict + setWhere produced no rows, the row exists and is refunded.
-  // Log so the operator can reconcile Stripe events vs DB state.
+  // 0 rows = the row exists and the setWhere predicate excluded the UPDATE.
+  // Most common cause is a re-delivered checkout.session.completed event for
+  // a row already flipped to "refunded"; in principle other future states
+  // could trigger this too, so the message stays cause-neutral and the
+  // operator should verify against the actual row.
   if (result.length === 0) {
     Sentry.captureMessage(
-      "checkout.session.completed re-delivered for refunded payment; UPDATE skipped",
+      "checkout.session.completed upsert skipped by setWhere; verify payments row state",
       {
         level: "info",
         tags: { stripe_session_id: session.id },
