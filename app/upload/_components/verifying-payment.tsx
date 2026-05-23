@@ -8,7 +8,10 @@ type Props = {
 };
 
 const POLL_INTERVAL_MS = 1500;
-const TIMEOUT_MS = 20_000;
+// Stripe webhook delivery typically lands in 1-5s but during incidents can
+// take 30s-5min. 90s covers ~99% of normal-conditions deliveries without
+// stranding the customer.
+const TIMEOUT_MS = 90_000;
 
 /**
  * Stripe redirects the buyer to /upload immediately on payment success, but

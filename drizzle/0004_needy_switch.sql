@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "decks_stripe_session_id_unique" ON "decks" USING btree ("stripe_session_id");

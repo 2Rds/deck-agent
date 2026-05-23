@@ -23,11 +23,26 @@ const FormSchema = z.object({
       message: "Could not parse amount. Try formats like 1.5M, 500K, $2,000,000.",
     }),
   instrument: InstrumentEnum,
+  // Note: optional radio/text inputs come through react-hook-form as "" rather
+  // than undefined. We normalize those in onSubmit before posting so the
+  // server sees `undefined` and downstream code (Pass 6 trigger especially)
+  // correctly reads them as "not provided".
   target_investors: TargetInvestorsEnum.optional(),
   traction_oneline: z.string().max(100).optional(),
   biggest_worry: z.string().max(300).optional(),
   additional_context: z.string().max(300).optional(),
 });
+
+const stripEmpty = <T extends Record<string, unknown>>(values: T): T => {
+  const out: Record<string, unknown> = { ...values };
+  for (const key of Object.keys(out)) {
+    const v = out[key];
+    if (typeof v === "string" && v.trim() === "") {
+      delete out[key];
+    }
+  }
+  return out as T;
+};
 
 type FormValues = z.infer<typeof FormSchema>;
 
@@ -89,13 +104,29 @@ export function UploadForm({ sessionId, customerEmail }: Props) {
     const fd = new FormData();
     fd.append("file", file);
     fd.append("session_id", sessionId);
-    fd.append("questionnaire", JSON.stringify(values));
+    fd.append("questionnaire", JSON.stringify(stripEmpty(values)));
 
     try {
       const res = await fetch("/api/upload", { method: "POST", body: fd });
       if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.error ?? `upload failed (${res.status})`);
+        const body = (await res.json().catch(() => ({}))) as {
+          error?: string;
+          details?: { fieldErrors?: Record<string, string[]> };
+          deckId?: string;
+        };
+        // If validation details are present (server-side Zod failure), surface
+        // the first field message instead of opaque "validation failed".
+        const fieldDetail = body.details?.fieldErrors
+          ? Object.entries(body.details.fieldErrors)
+              .map(([k, v]) => `${k}: ${v?.[0] ?? ""}`)
+              .filter((s) => s.endsWith(": ") === false)
+              .join("; ")
+          : null;
+        throw new Error(
+          fieldDetail
+            ? `${body.error ?? "validation failed"} — ${fieldDetail}`
+            : (body.error ?? `upload failed (${res.status})`),
+        );
       }
       const { deckId } = (await res.json()) as { deckId: string };
       window.location.href = `/processing/${deckId}`;

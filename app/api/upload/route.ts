@@ -107,9 +107,11 @@ export async function POST(request: Request) {
   // The validate-session layer already populated customerEmail from either.
   const customerEmail = validation.customerEmail;
   if (!customerEmail) {
-    Sentry.captureMessage("upload had no customer_email from validation", {
-      level: "warning",
-      tags: { stripe_session_id: sessionId },
+    // Severity: error not warning. Stage F refund logic depends on Sentry
+    // surfacing this as actionable — customer just paid and cannot proceed.
+    Sentry.captureMessage("upload blocked: paid session has no customer_email", {
+      level: "error",
+      tags: { stripe_session_id: sessionId, requires_refund: "true" },
     });
     return NextResponse.json(
       {
@@ -184,11 +186,41 @@ export async function POST(request: Request) {
         { status: 409 },
       );
     }
+    // Distinguish Postgres unique-violation (23505) — for deck_id this would
+    // signal an RNG collision, which is astronomically unlikely and would
+    // warrant immediate investigation rather than a generic DB failure log.
+    const pgCode =
+      err instanceof Error && "code" in err
+        ? (err as { code?: string }).code
+        : undefined;
+    if (pgCode === "23505") {
+      Sentry.captureMessage("Postgres unique violation on deck insert", {
+        level: "fatal",
+        tags: {
+          surface: "upload_db_transaction",
+          stripe_session_id: sessionId,
+          deck_id: deckId,
+        },
+      });
+    }
+    // Always tag the R2 orphan that just got leaked so the operator can find
+    // and delete via the r2_key tag. This catch fires AFTER uploadDeckPdf
+    // succeeded, so an orphan PDF exists at the logged key.
+    Sentry.captureMessage("R2 orphan leaked: DB transaction failed", {
+      level: "error",
+      tags: {
+        surface: "upload_db_transaction_orphan",
+        deck_id: deckId,
+        r2_key: `decks/${deckId}/original.pdf`,
+        stripe_session_id: sessionId,
+      },
+    });
     Sentry.captureException(err, {
       tags: {
         surface: "upload_db_transaction",
         stripe_session_id: sessionId,
         deck_id: deckId,
+        pg_code: pgCode ?? "unknown",
       },
     });
     return NextResponse.json(
@@ -197,9 +229,11 @@ export async function POST(request: Request) {
     );
   }
 
-  // Fire the pipeline asynchronously. If this fails, the deck row exists
-  // but never enters processing — Sentry surfaces, operator manually
-  // re-fires the event.
+  // Fire the pipeline. If Inngest fails, mark the deck failed explicitly so
+  // (a) the customer's /processing page shows the right state, (b) Stage F
+  // refund logic surfaces it, and (c) the deck is distinguishable from one
+  // that's actually being processed. The deck stays in DB so the operator
+  // can re-fire from the deck_id.
   try {
     await getInngest().send({
       name: "deck/uploaded",
@@ -211,11 +245,32 @@ export async function POST(request: Request) {
         surface: "upload_inngest_send",
         deck_id: deckId,
         stripe_session_id: sessionId,
+        requires_refund: "true",
       },
     });
-    // We still return 202 to the user — their deck is in the DB, the
-    // operator can re-fire the event. The UI will show "processing"
-    // until the pipeline picks it up or the operator marks failed.
+    try {
+      await db
+        .update(decks)
+        .set({
+          status: "failed",
+          failureReason: "inngest_dispatch_failed",
+        })
+        .where(eq(decks.id, deckId));
+    } catch (markErr) {
+      // Even the failure-marking failed. The deck row exists with status
+      // "uploaded" — operator must fix manually. Sentry will have both
+      // events; the dispatch one with requires_refund tag is the alert.
+      Sentry.captureException(markErr, {
+        tags: {
+          surface: "upload_inngest_send_failure_mark",
+          deck_id: deckId,
+        },
+      });
+    }
+    return NextResponse.json(
+      { error: "pipeline dispatch failed — your payment will be refunded", deckId },
+      { status: 502 },
+    );
   }
 
   return NextResponse.json({ deckId }, { status: 202 });

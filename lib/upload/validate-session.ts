@@ -54,6 +54,58 @@ export type ValidationResult =
  * would race with the webhook. Just poll until the webhook lands, with a
  * reasonable timeout (~10s) on the client.
  */
+/**
+ * DB-only session check for the polling endpoint. Returns `ok`/`already_used`
+ * once the webhook has landed, or `verifying` otherwise. Intentionally does
+ * NOT call Stripe — the initial server-component render already did the
+ * Stripe lookup; subsequent polls are waiting for the webhook to write the DB
+ * row. Skipping Stripe here prevents (a) burning Stripe rate-limit on a 1.5s
+ * poll loop, and (b) a DoS vector where unauthenticated callers proxy
+ * Stripe API calls through us.
+ */
+export async function validateSessionDbOnly(
+  sessionIdRaw: string | undefined | null,
+): Promise<
+  | { kind: "ok" }
+  | { kind: "already_used"; deckId: string }
+  | { kind: "verifying" }
+  | { kind: "not_paid" }
+  | { kind: "missing_session_id" }
+  | { kind: "invalid_session_id" }
+  | { kind: "internal_error" }
+> {
+  if (!sessionIdRaw) return { kind: "missing_session_id" };
+  if (!STRIPE_SESSION_ID_RE.test(sessionIdRaw)) return { kind: "invalid_session_id" };
+
+  try {
+    const rows = await db
+      .select({ status: payments.status, deckId: payments.deckId })
+      .from(payments)
+      .where(eq(payments.stripeSessionId, sessionIdRaw))
+      .limit(1);
+    const row = rows[0];
+    if (!row) return { kind: "verifying" };
+    if (row.status === "used") {
+      if (!row.deckId) {
+        Sentry.captureMessage(
+          "payment.status='used' but deck_id is null (poll path)",
+          { level: "fatal", tags: { stripe_session_id: sessionIdRaw } },
+        );
+        return { kind: "internal_error" };
+      }
+      return { kind: "already_used", deckId: row.deckId };
+    }
+    if (row.status === "paid") return { kind: "ok" };
+    if (row.status === "refunded") return { kind: "not_paid" };
+    return { kind: "verifying" };
+  } catch (err) {
+    Sentry.captureException(err, {
+      tags: { surface: "validate_session_db_only" },
+    });
+    return { kind: "internal_error" };
+  }
+}
+
 export async function validateSession(
   sessionIdRaw: string | undefined | null,
 ): Promise<ValidationResult> {
@@ -96,7 +148,20 @@ export async function validateSession(
   }
 
   if (dbRow) {
-    if (dbRow.status === "used" && dbRow.deckId) {
+    if (dbRow.status === "used") {
+      if (!dbRow.deckId) {
+        // Invariant violation: status='used' should always have a deck_id set
+        // atomically in the upload-route transaction. Surface loudly — the
+        // customer would otherwise silently poll forever.
+        Sentry.captureMessage(
+          "payment.status='used' but deck_id is null — invariant violated",
+          {
+            level: "fatal",
+            tags: { stripe_session_id: sessionId },
+          },
+        );
+        return { kind: "internal_error" };
+      }
       return { kind: "already_used", deckId: dbRow.deckId };
     }
     if (dbRow.status === "paid") {
@@ -112,7 +177,13 @@ export async function validateSession(
       return { kind: "not_paid", reason: "payment was refunded" };
     }
     // status === "pending" — odd; webhook should have flipped to paid. Fall
-    // through to Stripe verification.
+    // through to Stripe verification, but surface a Sentry alert so the
+    // operator can manually re-deliver the webhook from Stripe dashboard if
+    // it's been pending for any meaningful time.
+    Sentry.captureMessage("payment row stuck in pending state", {
+      level: "warning",
+      tags: { stripe_session_id: sessionId },
+    });
   }
 
   // 2. Fall back to Stripe API to verify directly.

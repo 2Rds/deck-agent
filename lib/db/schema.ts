@@ -89,6 +89,10 @@ export const decks = pgTable(
     index("decks_status_idx").on(t.status),
     index("decks_created_at_idx").on(t.createdAt),
     index("decks_customer_email_idx").on(t.customerEmail),
+    // Defense in depth: only one deck per paid session. The upload route's
+    // atomic UPDATE payments → INSERT decks transaction is the primary
+    // guard; this unique index catches any future path that bypasses it.
+    uniqueIndex("decks_stripe_session_id_unique").on(t.stripeSessionId),
   ],
 );
 
