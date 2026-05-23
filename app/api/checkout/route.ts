@@ -9,10 +9,7 @@ export async function POST() {
   const baseUrl = process.env.PUBLIC_BASE_URL;
   if (!baseUrl) {
     Sentry.captureMessage("PUBLIC_BASE_URL not configured", "error");
-    return NextResponse.json(
-      { error: "PUBLIC_BASE_URL is not configured" },
-      { status: 500 },
-    );
+    return NextResponse.json({ error: "checkout unavailable" }, { status: 500 });
   }
 
   const { introActive, priceId } = getActivePricing();
@@ -39,10 +36,7 @@ export async function POST() {
 
     if (!session.url) {
       Sentry.captureMessage("Stripe returned no checkout URL", "error");
-      return NextResponse.json(
-        { error: "Stripe did not return a checkout URL" },
-        { status: 502 },
-      );
+      return NextResponse.json({ error: "checkout unavailable" }, { status: 502 });
     }
 
     return NextResponse.json({ url: session.url, sessionId: session.id });

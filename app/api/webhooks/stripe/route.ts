@@ -1,18 +1,17 @@
 import { NextResponse } from "next/server";
 import * as Sentry from "@sentry/nextjs";
 import type Stripe from "stripe";
-import { getStripe } from "@/lib/stripe/client";
+import { getStripe, parseCentsEnv } from "@/lib/stripe/client";
 import { db, payments } from "@/lib/db/client";
 import { eq, ne } from "drizzle-orm";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-function extractStripeId(
-  ref: string | { id: string } | null | undefined,
+function extractStripeId<T extends { id: string }>(
+  ref: string | T | null | undefined,
 ): string | null {
-  if (typeof ref === "string") return ref;
-  return ref?.id ?? null;
+  return typeof ref === "string" ? ref : (ref?.id ?? null);
 }
 
 export async function POST(request: Request) {
@@ -69,9 +68,8 @@ export async function POST(request: Request) {
 async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
   const status = session.payment_status;
   // "paid" = standard happy path. "no_payment_required" = a 100%-off promo code
-  // (we set allow_promotion_codes: true). Both count as completed sessions
-  // and must produce a payments row so the /upload page can bind to the deck.
-  // Any other status (unpaid, pending) should not produce a row.
+  // (we set allow_promotion_codes: true). Both count as completed sessions and
+  // must produce a payments row so the /upload page can bind to the deck.
   if (status !== "paid" && status !== "no_payment_required") {
     Sentry.captureMessage("checkout.session.completed with unexpected status", {
       level: "warning",
@@ -89,59 +87,99 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
   }
 
   const introPricing = session.metadata?.intro_pricing === "true";
+  const customerEmail = session.customer_details?.email ?? null;
 
-  // Cross-check intro_pricing metadata against amount paid. If they disagree
-  // (e.g., a Stripe-Dashboard-created session has no metadata), record a
-  // warning rather than corrupt the analytics silently.
-  const introCents = Number(process.env.INTRO_PRICE_CENTS ?? 2900);
-  const standardCents = Number(process.env.STANDARD_PRICE_CENTS ?? 4900);
+  // Use the shared cents-validation helper rather than bare Number() to avoid
+  // silent NaN/0 on malformed env vars.
+  const introCents = parseCentsEnv("INTRO_PRICE_CENTS", 2900);
+  const standardCents = parseCentsEnv("STANDARD_PRICE_CENTS", 4900);
   const expectedCents = introPricing ? introCents : standardCents;
+  const discountCents = session.total_details?.amount_discount ?? 0;
+
+  // Real mismatch check: did the amount paid match what the metadata said the
+  // tier was? `no_payment_required` (amount_total === 0) bypasses since it's
+  // the legitimate 100%-off promo path. Other discounted amounts (partial
+  // promos) are accepted as long as the post-discount amount is plausible.
   if (
     session.amount_total !== 0 &&
-    session.amount_total !== expectedCents &&
-    session.amount_total !== introCents &&
-    session.amount_total !== standardCents
+    discountCents === 0 &&
+    session.amount_total !== expectedCents
   ) {
-    Sentry.captureMessage("checkout amount does not match any known price", {
+    Sentry.captureMessage("checkout amount does not match metadata tier", {
       level: "warning",
       tags: {
         stripe_session_id: session.id,
         amount_total: String(session.amount_total),
+        expected: String(expectedCents),
         intro_pricing: String(introPricing),
       },
+    });
+  }
+
+  // Surface paid sessions that lack a customer email — Stage D email delivery
+  // will need a fallback path for these.
+  if (status === "paid" && !customerEmail) {
+    Sentry.captureMessage("paid checkout session has no customer_email", {
+      level: "warning",
+      tags: { stripe_session_id: session.id },
     });
   }
 
   const values = {
     stripeSessionId: session.id,
     stripePaymentIntentId: extractStripeId(session.payment_intent),
-    customerEmail: session.customer_details?.email ?? null,
+    customerEmail,
     amountCents: session.amount_total,
     introPricing,
     status: "paid" as const,
   };
 
-  await db
+  const result = await db
     .insert(payments)
     .values(values)
     .onConflictDoUpdate({
       target: payments.stripeSessionId,
-      // Never resurrect a refunded payment back to "paid" if the webhook
-      // gets re-delivered after a refund completed.
+      // Never resurrect a refunded payment back to "paid" if a re-delivered
+      // checkout.session.completed event arrives after a refund.
       setWhere: ne(payments.status, "refunded"),
       set: values,
-    });
+    })
+    .returning({ id: payments.id });
+
+  // If onConflict + setWhere produced no rows, the row exists and is refunded.
+  // Log so the operator can reconcile Stripe events vs DB state.
+  if (result.length === 0) {
+    Sentry.captureMessage(
+      "checkout.session.completed re-delivered for refunded payment; UPDATE skipped",
+      {
+        level: "info",
+        tags: { stripe_session_id: session.id },
+      },
+    );
+  }
 }
 
 async function handlePaymentFailed(paymentIntent: Stripe.PaymentIntent) {
+  // Carefully redact PII from the error payload. last_payment_error contains
+  // billing_details with email/name/address that must not ship to Sentry.
+  const err = paymentIntent.last_payment_error;
+  const safeError = err
+    ? {
+        code: err.code,
+        decline_code: err.decline_code,
+        type: err.type,
+        message: err.message,
+      }
+    : null;
+
   console.warn(
-    `[webhook] payment_intent.payment_failed pi=${paymentIntent.id} reason=${paymentIntent.last_payment_error?.message ?? "unknown"}`,
+    `[webhook] payment_intent.payment_failed pi=${paymentIntent.id} code=${err?.code ?? "unknown"}`,
   );
   Sentry.captureMessage("Stripe payment failed", {
     level: "warning",
     tags: { payment_intent_id: paymentIntent.id },
     extra: {
-      last_payment_error: paymentIntent.last_payment_error,
+      last_payment_error: safeError,
       amount: paymentIntent.amount,
     },
   });
@@ -156,6 +194,26 @@ async function handleChargeRefunded(charge: Stripe.Charge) {
     });
     return;
   }
+
+  // Distinguish full from partial refunds. Stripe fires charge.refunded for
+  // both, but flipping status to "refunded" for a partial would lock the
+  // customer out of their already-delivered report. v1 expects only full
+  // refunds via the operator-triggered refund path; partials are operator
+  // goodwill and shouldn't change access.
+  const isFullRefund = charge.amount_refunded === charge.amount;
+  if (!isFullRefund) {
+    Sentry.captureMessage("partial refund — status unchanged", {
+      level: "info",
+      tags: {
+        charge_id: charge.id,
+        payment_intent_id: paymentIntentId,
+        amount: String(charge.amount),
+        amount_refunded: String(charge.amount_refunded),
+      },
+    });
+    return;
+  }
+
   const result = await db
     .update(payments)
     .set({ status: "refunded" })
@@ -163,12 +221,11 @@ async function handleChargeRefunded(charge: Stripe.Charge) {
     .returning({ id: payments.id });
 
   if (result.length === 0) {
-    // No row matched. This is a real silent-failure risk — the customer's
-    // refund landed in Stripe but we don't reflect it. Throw so Stripe retries
-    // and Sentry surfaces it.
+    // No row matched. This is a real silent-failure risk — the refund landed
+    // in Stripe but our DB doesn't reflect it. Throw so Stripe retries and
+    // Sentry surfaces it for operator action.
     throw new Error(
       `charge.refunded matched zero payments rows (pi=${paymentIntentId}, charge=${charge.id})`,
     );
   }
 }
-

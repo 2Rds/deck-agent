@@ -2,7 +2,7 @@ import Stripe from "stripe";
 
 let cached: { client: Stripe; keyPrefix: string } | null = null;
 
-function parseCentsEnv(name: string, fallback: number): number {
+export function parseCentsEnv(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw === undefined || raw === "") return fallback;
   const n = Number(raw);

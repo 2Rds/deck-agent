@@ -185,6 +185,29 @@ export function narrowDeck(deck: Deck): CompletedDeck | FailedDeck | ActiveDeck 
   return deck as ActiveDeck;
 }
 
+/**
+ * `PaidPayment` asserts the invariant that a paid payment row has captured
+ * customer_email. The webhook writes null email for `no_payment_required`
+ * promo sessions and surfaces a Sentry warning when paid sessions arrive
+ * without one — the narrowing helper throws so consumers (Stage D email
+ * delivery) handle the anomaly explicitly.
+ */
+export type PaidPayment = Payment & { status: "paid"; customerEmail: string };
+
+export function narrowPaidPayment(payment: Payment): PaidPayment {
+  if (payment.status !== "paid") {
+    throw new Error(
+      `payment ${payment.id} has status=${payment.status}, expected "paid"`,
+    );
+  }
+  if (!payment.customerEmail) {
+    throw new Error(
+      `paid payment ${payment.id} is missing customer_email — invariant violated`,
+    );
+  }
+  return payment as PaidPayment;
+}
+
 export function narrowReport(report: Report): PublicReport | PrivateReport {
   if (report.isPublic) {
     if (!report.publicToken) {
