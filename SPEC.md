@@ -16,7 +16,7 @@ This is the source-of-truth specification for building DeckRedTeam, an automated
 
 ## Section 1: Product Overview
 
-**What it is:** DeckRedTeam is an automated pitch deck analysis service. A founder uploads their pre-seed or seed pitch deck (PDF or PPTX), pays $29 (intro pricing, $49 standard), answers a 6-question context form, and receives an investor-grade red team report within 5 minutes.
+**What it is:** DeckRedTeam is an automated pitch deck analysis service. A founder uploads their pre-seed or seed pitch deck (PDF), pays $29 (intro pricing, $49 standard), answers a 6-question context form, and receives an investor-grade red team report within 5 minutes.
 
 **Who the customer is:** Pre-seed and seed founders actively preparing to fundraise or already in conversations with investors. Typically:
 - Stage: pre-seed through Series A
@@ -80,7 +80,7 @@ Stripe session metadata should include:
 
 The upload page validates the Stripe session via the session_id (checking with Stripe API that payment succeeded and hasn't been used yet). If valid, shows:
 
-- File upload (PDF or PPTX, max 25MB, drag-and-drop or click)
+- File upload (PDF only, max 25MB, drag-and-drop or click)
 - The 6-question questionnaire (see Section 5)
 - Submit button
 
@@ -135,24 +135,25 @@ A "Share this report" button on the page generates a public-shareable URL (diffe
 ### Stack
 
 - **Frontend:** Next.js (App Router) on Vercel
-- **Pipeline runtime:** Cloudflare Worker (separate from the Next.js app, deployed via Wrangler)
-- **Database:** Postgres on Neon (or Supabase — your call based on familiarity). Tables defined in Section 7.
-- **File storage:** Cloudflare R2 (for uploaded decks and rendered slide images)
+- **Pipeline runtime:** Inngest on Vercel (durable function execution with per-step retries and parallel step DAG). Replaces the original "Cloudflare Worker" choice — Inngest gives us automatic retries, time-travel replay, and a single deploy target colocated with Next.js.
+- **Database:** Postgres on Supabase (direct connection via `postgres-js`; not using Supabase Auth/Storage/Edge Functions). Tables defined in Section 7.
+- **File storage:** Cloudflare R2 (for uploaded PDFs only — no rendered slide images stored in v1)
 - **Payment:** Stripe Checkout (hosted)
 - **Email:** Resend
-- **PPTX → PDF conversion:** CloudConvert API (or ConvertAPI free tier for v1 if you want to skip billing setup)
-- **PDF → slide images:** Choose based on Worker compatibility. Cloudflare Workers can't run native binaries, so this likely means either (a) a separate compute layer for rendering, or (b) a third-party API for PDF-to-image conversion, or (c) doing the rendering client-side before upload using pdf.js. Decide based on what's fastest to ship — your call. **CloudConvert can also do PDF → PNG conversions, so a single service can handle both conversions.**
-- **AI:** Anthropic API, model `claude-sonnet-4-6` for all six passes
+- **File format:** PDF only. PPTX is not accepted in v1. Landing page and upload page include clear "How to export to PDF" instructions for PowerPoint, Keynote, and Google Slides users. PPTX support is a possible v1.1 feature if customer demand justifies re-adding CloudConvert.
+- **Slide ingestion for Pass 1:** PDF sent directly to the Anthropic API via the `document` content block. Claude renders each page server-side for vision processing. No CloudConvert, no PDF→PNG step, no `decks/{id}/slides/` storage. This change saves 15-30s wall-clock per deck and removes one full point of failure.
+- **AI:** Anthropic API, model `claude-sonnet-4-6` for all six passes (Tier 2 confirmed)
+- **Error monitoring:** Sentry (`@sentry/nextjs` for the Next.js app, `@sentry/node` or the relevant SDK for the Inngest function runtime)
 
 ### Why this stack
 
-- Vercel + Next.js: your existing AgentCorp stack — no new infra to learn
-- Cloudflare Worker: your existing infra, long execution times (no 60-second timeout issue), good at the orchestration role
-- Neon/Supabase: managed Postgres, free tier covers launch volume
-- R2: cheap, S3-compatible, no egress fees, plays well with Workers
+- Vercel + Next.js: existing AgentCorp/BlockDrive stack — no new infra to learn
+- Inngest: durable step execution maps cleanly onto the 6-pass dependency graph; retries and parallel steps are config not code; one less deploy target than a separate CF Worker
+- Supabase: managed Postgres, free tier covers launch volume, easier dashboard than Neon for ad-hoc report queries
+- R2: cheap, S3-compatible, no egress fees, plays well with serverless
 - Stripe Checkout: zero custom code for payment
 - Resend: simple API, good deliverability
-- CloudConvert: handles both PPTX→PDF and PDF→PNG in one service
+- Sentry: programmatic project creation via Sentry MCP, error capture across web + worker on day one
 
 ### Component communication
 
@@ -161,13 +162,13 @@ A "Share this report" button on the page generates a public-shareable URL (diffe
     ↓ Stripe Checkout
 [Stripe] ← webhooks → [Vercel API route /api/webhooks/stripe]
     ↓ writes to
-[Postgres]
+[Postgres on Supabase]
     ↑ writes to
 [Vercel API route /api/upload]
-    ↓ triggers
-[Cloudflare Worker pipeline]
+    ↓ triggers via inngest.send()
+[Inngest pipeline (6 passes as durable steps)]
     ↓ uses
-[CloudConvert, Anthropic API, R2, Resend]
+[Anthropic API (PDF input), R2 (deck storage), Resend (delivery)]
     ↓ updates
 [Postgres]
     ← polled by →
@@ -176,17 +177,31 @@ A "Share this report" button on the page generates a public-shareable URL (diffe
 
 ### Suggested repo structure
 
-Monorepo with two deployable apps:
+Single Next.js app on Vercel (no separate worker deploy needed — Inngest runs inside the same Next.js app via `/api/inngest`).
 
 ```
 /
-├── apps/
-│   ├── web/                   # Next.js app
-│   └── worker/                # Cloudflare Worker pipeline
-├── packages/
-│   ├── prompts/               # The 6 prompt files (loaded at runtime by worker)
-│   ├── schemas/               # Zod schemas shared between web and worker
-│   └── db/                    # Shared DB client (Drizzle or Prisma)
+├── app/                       # Next.js App Router pages and API routes
+│   ├── (marketing)/page.tsx   # Landing page
+│   ├── upload/page.tsx        # Post-payment upload + questionnaire
+│   ├── processing/[deckId]/   # Live progress screen
+│   ├── report/[deckId]/[token]/  # Private report
+│   ├── r/[publicToken]/       # Public shared report
+│   └── api/
+│       ├── webhooks/stripe/   # Stripe webhook handler
+│       ├── checkout/          # Create Stripe Checkout session
+│       ├── upload/            # File + questionnaire submission
+│       └── inngest/           # Inngest function endpoint
+├── lib/
+│   ├── inngest/               # Inngest client + pipeline function definitions
+│   ├── anthropic/             # Anthropic client + per-pass wrappers
+│   ├── prompts/               # The 6 prompt files (loaded at runtime)
+│   ├── schemas/               # Zod schemas (moved from /schemas/ at root)
+│   ├── db/                    # Supabase Postgres client + queries
+│   ├── r2/                    # R2 client for PDF storage
+│   └── stripe/                # Stripe client + price logic
+├── prompts/                   # Source-of-truth prompt files (symlinked or copied to lib/prompts at build)
+├── schemas/                   # Source-of-truth Zod schemas (re-exported from lib/schemas)
 ├── SPEC.md                    # This document
 └── README.md                  # Setup instructions
 ```
@@ -534,9 +549,9 @@ When a founder clicks "Share this report":
 
 ### File storage in R2
 
-- `decks/{deck_id}/original.{pdf|pptx}` — uploaded file
-- `decks/{deck_id}/converted.pdf` — converted from PPTX (if applicable)
-- `decks/{deck_id}/slides/slide-{N}.png` — rendered slide images
+- `decks/{deck_id}/original.pdf` — uploaded PDF (the only file stored)
+
+No rendered slide images are stored in v1. Each Pass 1 call fetches the PDF from R2, slices the relevant page, and passes it to Claude via the `document` block. If we later move to a PNG-rendering path, slide images would live at `decks/{deck_id}/slides/slide-{N}.png`.
 
 ### Retention
 
@@ -548,15 +563,15 @@ For v1: keep everything indefinitely. Storage is cheap and you may want to revie
 
 ### Trigger
 
-The pipeline starts when the upload endpoint successfully writes the deck to Postgres. Vercel calls the Worker via a POST request with `{ deck_id }`. The Worker responds immediately with 202 Accepted and processes asynchronously.
+The pipeline starts when the upload endpoint successfully writes the deck to Postgres. The upload route calls `inngest.send({ name: "deck/uploaded", data: { deck_id } })` and returns 202 to the client. Inngest invokes the pipeline function asynchronously and persists step state for retries.
 
 ### Stages
 
-**Stage 0 — Preparation (5-15 sec)**
-- Load deck from Postgres
-- If PPTX: convert to PDF via CloudConvert, store result in R2
-- Convert PDF to per-slide PNG images (via CloudConvert or chosen method)
-- Extract text layer per slide (best-effort, may be incomplete)
+**Stage 0 — Preparation (3-8 sec)**
+- Load deck record from Postgres
+- Fetch the uploaded PDF from R2 (or stream it on demand per Pass 1 call)
+- Parse the PDF to get slide count (via `pdf-lib` or `pdfjs-dist` running in the Inngest function — both are pure-JS and run fine in the Vercel/Node runtime)
+- Extract text layer per slide (best-effort, may be incomplete — passed as supplementary input to Pass 1)
 - Update `decks.status` to `processing`, `slide_count` set
 - Emit progress event: "Deck received ({N} slides detected)"
 
@@ -598,8 +613,9 @@ Recommendation: **Option B**. Polling at 2s interval for 3 minutes = 90 requests
 ### Concurrency considerations
 
 - Multiple decks may be in processing simultaneously
-- The Worker should handle concurrent invocations cleanly (each Worker invocation handles exactly one deck end-to-end)
-- Anthropic API rate limits apply globally — at Tier 2+, you can handle ~10 concurrent decks comfortably. Below that, queue or reject submissions during peak periods.
+- Inngest handles per-deck function invocations cleanly — each `deck/uploaded` event spawns its own function run with isolated step state
+- Anthropic Tier 2 limits: 100K ITPM / 20K OTPM on Sonnet 4.6. Pass 1 is throttled to 6 parallel slide-extraction calls per deck to stay under OTPM even with 2-3 concurrent decks in flight. Larger decks (>18 slides) process Pass 1 in waves of 6.
+- Inngest concurrency cap set to 10 concurrent pipeline runs at launch. Above that, events queue.
 
 ---
 
@@ -734,39 +750,42 @@ If you find yourself building any of the above, stop. Re-read this section. Then
 
 ### Pre-launch infrastructure setup (Saturday)
 
-- [ ] Domain registered (suggested: deckredteam.com, redteam.deck, partnerproof.com — operator chooses)
+- [ ] Domain registered (operator picks; using `deckredteam.com` as placeholder in env vars until chosen)
 - [ ] Vercel project created and linked to repo
-- [ ] Cloudflare account: Worker created, R2 bucket created, custom domain configured if desired
-- [ ] Neon or Supabase project created, connection string in env vars
+- [ ] Cloudflare account: R2 bucket created (Workers no longer used)
+- [ ] Supabase project created, Postgres connection string in env vars
+- [ ] Inngest account created, app registered, signing key + event key in env vars
 - [ ] Stripe account in live mode, product created, webhook endpoint registered
 - [ ] Resend account, domain verified, API key in env vars
-- [ ] CloudConvert account, API key in env vars
-- [ ] Anthropic API key in env vars (verify Tier 2+ for Sonnet 4.6)
+- [ ] Sentry project created (via Sentry MCP), DSN in env vars
+- [ ] Anthropic API key in env vars (Tier 2 confirmed for Sonnet 4.6)
 
 ### Environment variables (final list)
 
-Web app:
-- `DATABASE_URL`
+Single Next.js app on Vercel (Inngest runs inside the same app via `/api/inngest`):
+
+- `BRAND_DOMAIN` (placeholder: `deckredteam.com`)
+- `PUBLIC_BASE_URL`
+- `DATABASE_URL` (Supabase Postgres direct connection)
 - `STRIPE_SECRET_KEY`
 - `STRIPE_WEBHOOK_SECRET`
 - `STRIPE_PUBLISHABLE_KEY`
 - `STRIPE_PRICE_ID_INTRO` (or compute dynamically)
 - `STRIPE_PRICE_ID_STANDARD`
+- `INTRO_PRICE_CENTS` (default 2900)
+- `STANDARD_PRICE_CENTS` (default 4900)
 - `INTRO_PRICING_END_DATE`
-- `WORKER_TRIGGER_URL`
-- `WORKER_AUTH_SECRET` (shared with Worker)
-- `PUBLIC_BASE_URL`
-
-Worker:
-- `DATABASE_URL`
 - `ANTHROPIC_API_KEY`
-- `CLOUDCONVERT_API_KEY`
 - `RESEND_API_KEY`
+- `RESEND_FROM_EMAIL`
 - `R2_ACCESS_KEY_ID`
 - `R2_SECRET_ACCESS_KEY`
 - `R2_BUCKET_NAME`
 - `R2_ACCOUNT_ID`
-- `WORKER_AUTH_SECRET`
+- `INNGEST_EVENT_KEY`
+- `INNGEST_SIGNING_KEY`
+- `SENTRY_DSN`
+- `SENTRY_AUTH_TOKEN` (for source-map upload at build)
 
 ### Launch day (Monday 7am ET)
 

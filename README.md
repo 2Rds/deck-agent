@@ -53,36 +53,35 @@ deckredteam/
 14. Test against the 3 test decks specified in SPEC.md Section 10.
 15. Deploy and run the launch checklist.
 
-## Stack Decisions Already Made
+## Stack Decisions (Finalized May 2026)
 
-- Next.js + Vercel for web
-- Cloudflare Worker for the pipeline
-- Postgres on Neon or Supabase
-- Cloudflare R2 for files
-- Stripe Checkout
-- Resend for email
-- CloudConvert for PPTX→PDF and PDF→PNG
-- `claude-sonnet-4-6` for all six passes
-- Zod for runtime validation
+- **Web framework:** Next.js (App Router) on Vercel
+- **Pipeline runtime:** Inngest on Vercel (durable steps, parallel DAG, retries as config) — replaces SPEC.md's original "Cloudflare Worker"
+- **Database:** Supabase Postgres (direct `postgres-js` connection; Auth/Storage/Edge Functions not used)
+- **File storage:** Cloudflare R2 (PDFs only — no rendered slide images stored)
+- **Payment:** Stripe Checkout (hosted)
+- **Email:** Resend
+- **File format:** PDF only. PPTX cut from v1 (export-to-PDF instructions on landing/upload pages)
+- **Slide ingestion:** PDF sent directly to Anthropic via `document` content block — skips the PDF→PNG conversion step the original spec assumed
+- **AI model:** `claude-sonnet-4-6` for all six passes (Anthropic Tier 2)
+- **Error monitoring:** Sentry (web + Inngest function)
+- **Validation:** Zod runtime validation against `/schemas/*.ts`
 
-## Stack Decisions Left to You
+CloudConvert is **not** used in v1. May be re-added in v1.1 if PPTX demand materializes.
 
-- Drizzle vs Prisma vs raw SQL for DB layer
-- SSE vs polling for progress UI (SPEC.md recommends polling)
-- Specific PDF-to-image approach within the Worker constraints
-- Exact concurrency primitives
-- CSS approach (Tailwind, vanilla CSS, etc. — Tailwind recommended given operator's existing stack familiarity)
-- Specific monitoring/logging approach
+## Stack Decisions Left Open
 
-## Questions for the Operator (Sean) Before Starting
+- DB query layer (Drizzle vs raw SQL — leaning Drizzle for type safety with Zod-inferred types)
+- CSS approach (Tailwind recommended given operator's existing stack)
+- Specific PDF page-slicing approach (`pdf-lib` vs `pdfjs-dist` — pick at implementation time)
 
-If you have questions that the spec doesn't answer, ask before building. Better to clarify than to build the wrong thing. Specifically check:
+## Deviations from Original SPEC
 
-- Domain name choice (the spec doesn't pick one)
-- Whether to use Neon or Supabase
-- Whether to use CloudConvert paid tier or ConvertAPI free tier for v1
-- Anthropic API tier (must be Tier 2+ for Sonnet 4.6 at expected volume — verify before building)
-- Whether the operator wants to set up monitoring (Sentry, etc.) at launch or defer
+These changes were made after rule-1 and rule-2 source-of-truth constraints were relaxed by the operator. Each deviation is documented here and in commit messages.
+
+1. **Cloudflare Worker → Inngest on Vercel.** Durable retries, parallel step DAG, single deploy target. Removes a deploy and an auth boundary.
+2. **PDF or PPTX → PDF only.** Removes CloudConvert from the critical path entirely. Lost customer estimate <10%, all of whom can export-to-PDF in 5 seconds. Landing page includes export instructions for PowerPoint/Keynote/Google Slides.
+3. **PDF→PNG conversion → Claude `document` block.** Anthropic renders each PDF page server-side. Saves 15-30s wall-clock per deck and removes a failure mode. Pass 1 prompt's "[Slide image attached]" wording updated to reference the PDF page directly.
 
 ## Success Criteria
 
