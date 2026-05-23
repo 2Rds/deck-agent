@@ -136,7 +136,7 @@ A "Share this report" button on the page generates a public-shareable URL (diffe
 
 - **Frontend:** Next.js (App Router) on Vercel
 - **Pipeline runtime:** Inngest on Vercel (durable function execution with per-step retries and parallel step DAG). Replaces the original "Cloudflare Worker" choice — Inngest gives us automatic retries, time-travel replay, and a single deploy target colocated with Next.js.
-- **Database:** Postgres on Supabase (direct connection via `postgres-js`; not using Supabase Auth/Storage/Edge Functions). Tables defined in Section 7.
+- **Database:** Postgres on Supabase via the **transaction pooler** (Supavisor, port 6543) using `postgres-js` with `prepare: false`. Direct connection (port 5432) is IPv6-only as of Supabase's 2024 change, incompatible with most Vercel serverless and WSL local dev environments. Pooler is the Supabase-recommended pattern for serverless workloads. Not using Supabase Auth/Storage/Edge Functions. Tables defined in Section 7.
 - **File storage:** Cloudflare R2 (for uploaded PDFs only — no rendered slide images stored in v1)
 - **Payment:** Stripe Checkout (hosted)
 - **Email:** Resend

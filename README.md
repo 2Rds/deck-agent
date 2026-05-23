@@ -82,6 +82,7 @@ These changes were made after rule-1 and rule-2 source-of-truth constraints were
 1. **Cloudflare Worker → Inngest on Vercel.** Durable retries, parallel step DAG, single deploy target. Removes a deploy and an auth boundary.
 2. **PDF or PPTX → PDF only.** Removes CloudConvert from the critical path entirely. Lost customer estimate <10%, all of whom can export-to-PDF in 5 seconds. Landing page includes export instructions for PowerPoint/Keynote/Google Slides.
 3. **PDF→PNG conversion → Claude `document` block.** Anthropic renders each PDF page server-side. Saves 15-30s wall-clock per deck and removes a failure mode. Pass 1 prompt's "[Slide image attached]" wording updated to reference the PDF page directly.
+4. **Supabase direct connection → transaction pooler (Supavisor).** Direct connection is IPv6-only as of Supabase's 2024 change, incompatible with most Vercel serverless and WSL local-dev environments. Pooler (port 6543) is the Supabase-recommended pattern for serverless workloads. `postgres-js` configured with `prepare: false` for transaction-pooled compatibility.
 
 ## Success Criteria
 
