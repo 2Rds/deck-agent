@@ -16,6 +16,12 @@ const nextConfig: NextConfig = {
       bodySizeLimit: "30mb",
     },
   },
+  // The Inngest pipeline reads the source-of-truth prompt markdown files at
+  // runtime via fs.readFileSync. Vercel's file tracing doesn't see fs reads,
+  // so we explicitly include /prompts in the function bundle.
+  outputFileTracingIncludes: {
+    "/api/inngest": ["./prompts/**/*"],
+  },
 };
 
 export default withSentryConfig(nextConfig, {
