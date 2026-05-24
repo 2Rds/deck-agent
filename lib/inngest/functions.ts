@@ -20,6 +20,7 @@ import {
   hasBiggestWorry,
 } from "@/lib/pipeline/defaults";
 import { FAILURE_REASONS } from "@/lib/pipeline/failure-reasons";
+import { issueRefundForDeck } from "@/lib/pipeline/refund";
 import { sendReportEmail, sendOperatorAlert } from "@/lib/email/client";
 
 import { Pass1OutputSchema, type Pass1Output } from "@/schemas/pass-1-output";
@@ -60,21 +61,9 @@ async function markDeckFailed(
       },
     });
   }
-  // Notify the operator so refunds can be issued and the customer informed.
-  try {
-    await sendOperatorAlert({
-      subject: `Pipeline failure: ${reason}`,
-      body: `Deck ${deckId} failed with reason: ${reason}\nStripe session: ${stripeSessionId}\nCheck Sentry for the stack trace.`,
-    });
-  } catch (alertErr) {
-    Sentry.captureException(alertErr, {
-      tags: {
-        surface: "pipeline_operator_alert",
-        deck_id: deckId,
-        requires_refund: "true",
-      },
-    });
-  }
+  // Issue the refund + send the customer + operator emails. The helper
+  // catches all internal errors and tags Sentry — never throws.
+  await issueRefundForDeck(deckId, reason);
 }
 
 export const deckPipeline = inngest.createFunction(
