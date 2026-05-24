@@ -78,6 +78,14 @@ function ErrorState({
       body =
         "We've been notified and are looking into it. Email support if this keeps happening.";
       break;
+    default: {
+      // Exhaustiveness guard — if a new ValidationResult variant is added in
+      // lib/upload/validate-session.ts and isn't handled here, TypeScript
+      // will refuse to assign it to `never`. Mirror the pattern from
+      // app/api/upload/route.ts.
+      const _exhaustive: never = result;
+      throw new Error(`unhandled ErrorState kind: ${JSON.stringify(_exhaustive)}`);
+    }
   }
 
   return (

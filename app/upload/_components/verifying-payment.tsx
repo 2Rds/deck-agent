@@ -51,7 +51,14 @@ export function VerifyingPayment({ sessionId, supportEmail }: Props) {
             }
             return;
           }
-          const { kind } = (await res.json()) as { kind: string };
+          const body = (await res.json().catch(() => ({}))) as { kind?: unknown };
+          const kind = typeof body.kind === "string" ? body.kind : undefined;
+          if (kind === undefined) {
+            if (!cancelled) {
+              setError("session check returned an unexpected response");
+            }
+            return;
+          }
           if (TERMINAL_KINDS.has(kind)) {
             // Reload so the server component re-renders with the appropriate
             // form / error / already-used page.

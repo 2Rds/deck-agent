@@ -179,24 +179,31 @@ export async function validateSession(
     // status === "pending" — odd; webhook should have flipped to paid. Fall
     // through to Stripe verification. Surface a Sentry alert ONLY for rows
     // older than 30s — for fresh rows the webhook is just racing the render
-    // and shouldn't generate alert noise.
-    // Note: Drizzle doesn't expose createdAt on the partial select above,
-    // so refetch only when we're already past the fast path.
-    const stale = await db
-      .select({ createdAt: payments.createdAt })
-      .from(payments)
-      .where(eq(payments.stripeSessionId, sessionId))
-      .limit(1);
-    const ageMs = stale[0]
-      ? Date.now() - new Date(stale[0].createdAt).getTime()
-      : 0;
-    if (ageMs > 30_000) {
-      Sentry.captureMessage("payment row stuck in pending state for >30s", {
-        level: "warning",
-        tags: {
-          stripe_session_id: sessionId,
-          age_ms: String(ageMs),
-        },
+    // and shouldn't generate alert noise. The staleness probe is best-effort
+    // observability; if it throws (DB blip mid-call), swallow rather than
+    // breaking validateSession's contract of always returning a
+    // ValidationResult.
+    try {
+      const stale = await db
+        .select({ createdAt: payments.createdAt })
+        .from(payments)
+        .where(eq(payments.stripeSessionId, sessionId))
+        .limit(1);
+      const ageMs = stale[0]
+        ? Date.now() - new Date(stale[0].createdAt).getTime()
+        : 0;
+      if (ageMs > 30_000) {
+        Sentry.captureMessage("payment row stuck in pending state for >30s", {
+          level: "warning",
+          tags: {
+            stripe_session_id: sessionId,
+            age_ms: String(ageMs),
+          },
+        });
+      }
+    } catch (err) {
+      Sentry.captureException(err, {
+        tags: { surface: "validate_session_stale_check" },
       });
     }
   }
